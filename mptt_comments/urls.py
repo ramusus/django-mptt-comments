@@ -1,4 +1,4 @@
-from django.conf.urls.defaults import *
+from django.conf.urls import *
 from django.contrib.comments.urls import urlpatterns as contrib_comments_urlpatterns
 from django.conf import settings
 
@@ -27,7 +27,7 @@ urlpatterns = patterns('mptt_comments.views',
         'comments_more',
         name='comments-more-in-tree',
         kwargs={'restrict_to_tree': True }
-    ),    
+    ),
     url(r'^replies/(\d+)/$',
         'comments_subtree',
         name='comments-subtree'
@@ -40,7 +40,7 @@ urlpatterns = patterns('mptt_comments.views',
     url(r'^count/(\d+)/$',
         'count_for_objects',
         name='comments-counts'
-    )    
+    )
 )
 
 urlpatterns += contrib_comments_urlpatterns
