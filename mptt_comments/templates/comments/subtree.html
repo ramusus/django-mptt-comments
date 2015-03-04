@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "comments/base.html" %}
 {# replace with your own base template and content block #}
 {% load mptt_comments_tags %}
 
@@ -13,10 +13,16 @@
 
 {% if comments %}<h2>{% trans "Comments" %}</h2>{% endif %}
  
-<div id="mptt-comments-tree">
+<div id="mptt-comments-tree" class="block-comments-tree">
         
 {% include "comments/display_comments_tree.html" %}    
        
 </div>
 
+{% endblock %}
+
+{% block pagination %}
+  {% if pagination %}
+    {% include "comments/pagination.html" %}
+  {% endif %}
 {% endblock %}

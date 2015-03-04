@@ -1,5 +1,5 @@
-from django.conf.urls import *
-from django.contrib.comments.urls import urlpatterns as contrib_comments_urlpatterns
+from django.conf.urls import patterns, url, include
+from django_comments.urls import urlpatterns as contrib_comments_urlpatterns
 from django.conf import settings
 
 urlpatterns = patterns('mptt_comments.views',
@@ -7,9 +7,13 @@ urlpatterns = patterns('mptt_comments.views',
         'new_comment',
         name='new-comment'
     ),
-    url(r'^reply/(\d+)/$',
+    url(r'^reply/(?P<parent_pk>\d+)/$',
         'new_comment',
         name='comment-reply'
+    ),
+    url(r'^new_comment/(?P<content_type>[\w.]+)/(?P<object_pk>\d+)/$',
+        'new_comment',
+        name='comment-toplevel-reply'
     ),
     url(r'^post/$',
         'post_comment',
@@ -37,9 +41,13 @@ urlpatterns = patterns('mptt_comments.views',
         name='comment-detail',
         kwargs={'include_self': True, 'include_ancestors': True}
     ),
-    url(r'^count/(\d+)/$',
-        'count_for_objects',
-        name='comments-counts'
+    url(r'^tree/(\d+)/$',
+        'comments_fulltree',
+        name='comment-detail-tree',
+    ),
+    url(r'^count/(\d+)/(\d+)/$',
+        'count_for_object',
+        name='comments-count'
     )
 )
 

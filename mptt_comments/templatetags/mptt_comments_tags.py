@@ -1,11 +1,13 @@
 from django.contrib import comments
-from django.contrib.comments.templatetags.comments import BaseCommentNode, CommentListNode
+from django_comments.templatetags.comments import BaseCommentNode, CommentListNode
 from django import template
 from django.conf import settings
 from django.template.loader import render_to_string
 from django.utils.safestring import mark_safe
 from django.utils.encoding import smart_unicode
 from django.db.models import Max, Count
+from django.core.urlresolvers import reverse
+from django.template import RequestContext
 
 register = template.Library()
 
@@ -24,7 +26,7 @@ class BaseMpttCommentNode(BaseCommentNode):
         """
             Class method to parse get_comment_list/count/form and return a Node.
 
-            Forked from django.contrib.comments.templatetags. with_parent, 
+            Forked from django_comments.templatetags. with_parent, 
             root-only concepts borrowed from django-threadedcomments.
         """
         tokens = token.contents.split()
@@ -94,6 +96,18 @@ class MpttCommentFormNode(BaseMpttCommentNode):
         context[self.as_varname] = self.get_form(context)
         return ''
         
+class MpttCommentNewLinkNode(MpttCommentFormNode):
+    """Get the url to post a new comment"""
+    
+    def get_link(self, context):
+        ctype, object_pk = self.get_target_ctype_pk(context)
+        content_type = "%s.%s" % (ctype.app_label, ctype.model)
+        return reverse('comment-toplevel-reply', kwargs={'content_type': content_type, 'object_pk': object_pk})
+        
+    def render(self, context):
+        context[self.as_varname] = self.get_link(context)
+        return ''
+        
 class MpttCommentTopLevelCountNode(BaseMpttCommentNode):
 
     """Insert a count of toplevel comments into the context."""
@@ -101,12 +115,10 @@ class MpttCommentTopLevelCountNode(BaseMpttCommentNode):
     def get_context_value_from_queryset(self, context, qs):
         return qs.filter(level=0).order_by().count()
         
-class MpttCommentHiddenCountNode(BaseMpttCommentNode):
+class BaseMpttCommentWithoutFilteringNode(BaseMpttCommentNode):
 
-    """Insert a count of hidden comments into the context."""
-    
     def get_query_set(self, context):
-        # Copied from django.contrib.comments, but changing the is_public filter
+        # Copied from django_comments, but changing the is_public filter
         # Too bad you can't "unfilter" a queryset... :(
         
         ctype, object_pk = self.get_target_ctype_pk(context)
@@ -117,19 +129,38 @@ class MpttCommentHiddenCountNode(BaseMpttCommentNode):
             content_type = ctype,
             object_pk    = smart_unicode(object_pk),
             site__pk     = settings.SITE_ID,
-        )
-        
-        # The is_public and is_removed fields are implementation details of the
-        # built-in comment model's spam filtering system, so they might not
-        # be present on a custom comment model subclass. If they exist, we 
-        # should filter on them.
-        field_names = [f.name for f in self.comment_model._meta.fields]
-        if 'is_public' in field_names:
-            qs = qs.filter(is_public=False) # changed line is here
-        if getattr(settings, 'COMMENTS_HIDE_REMOVED', True) and 'is_removed' in field_names:
-            qs = qs.filter(is_removed=False)
-        
+        )        
         return qs
+        
+    def get_context_value_from_queryset(self, context, qs):
+        return qs
+
+    def render(self, context):
+        qs = self.get_query_set(context)
+        context[self.as_varname] = self.get_context_value_from_queryset(context, qs)
+        return ''
+
+class MpttCommentInModerationOnlyListNode(BaseMpttCommentWithoutFilteringNode):
+
+    """
+    Insert a list of 'in moderation' (is_public=False) comments into the context.
+    Does NOT include removed comments, only non public ones. Useful to display
+    the comments awaiting moderation to a moderator.
+    """
+
+    # FIXME: what about parameters beside "as" ?
+    
+    def get_query_set(self, context):
+        qs = super(MpttCommentInModerationOnlyListNode, self).get_query_set(context)
+        return qs.filter(is_public=False, is_removed=False)
+        
+class MpttCommentInModerationOnlyCountNode(MpttCommentInModerationOnlyListNode):
+
+    """
+    Insert a count of 'in moderation' (is_public=False) comments into the context.
+    Does NOT include removed comments, only non public ones. Useful to display
+    the number of comments awaiting moderation.
+    """
             
     def get_context_value_from_queryset(self, context, qs):
         return qs.count()
@@ -179,9 +210,10 @@ class MpttCommentListNode(BaseMpttCommentNode):
         if self.reverse:
             qs = qs.reverse()
         offset = self.get_offset()
-        if offset > 0:
+        if offset > 0 and not getattr(settings, 'MPTT_COMMENTS_DONT_PAGINATE', False):
             return list(qs[:offset])
-        # if offset <= 0, don't list(): the developer will use its own pagination system
+        # if offset <= 0 or MPTT_COMMENTS_DONT_PAGINATE is True, don't list():
+        # the developer will use its own pagination system
         return qs 
         
     def get_offset(self):
@@ -193,9 +225,10 @@ class MpttCommentListNode(BaseMpttCommentNode):
     def render(self, context):
         qs = self.get_query_set(context)
         context[self.as_varname] = self.get_context_value_from_queryset(context, qs)
+        use_internal_pagination_system = not getattr(settings, 'MPTT_COMMENTS_DONT_PAGINATE', False)
         
-        # 'Remaining comments' : if offset is <= 0, we don't handle those
-        if self.get_offset() > 0:
+        # 'Remaining comments'
+        if self.get_offset() > 0 and use_internal_pagination_system:
             comments_remaining = qs.count()
             comments_remaining = (comments_remaining - self.get_offset()) > 0 and comments_remaining - self.get_offset() or 0
             
@@ -213,6 +246,9 @@ class MpttCommentListNode(BaseMpttCommentNode):
         context['collapse_levels_above'] = getattr(settings, 'MPTT_COMMENTS_COLLAPSE_ABOVE', 2)
         context['cutoff_level'] = self.cutoff_level
         context['bottom_level'] = self.bottom_level
+        context['offset'] = self.get_offset()
+        context['internal_pagination'] = use_internal_pagination_system
+        context['reversed'] = self.reverse
         return ''
         
 class MpttSpecialTreeListNode(MpttCommentListNode):
@@ -236,20 +272,20 @@ class MpttSpecialTreeListNode(MpttCommentListNode):
             qs = qs.values_list('tree_id', flat=True).annotate(max_date=Max('submit_date')).order_by('-max_date')
         return qs
 
-def get_mptt_comment_hidden_count(parser, token):
+def get_mptt_comment_inmoderation_count(parser, token):
     """
-    Gets the non public comment count for the given params and populates the template
+    Gets the non public, non removed comment count for the given params and populates the template
     context with a variable containing that value, whose name is defined by the
     'as' clause.
 
     Syntax::
 
-        {% get_mptt_comment_hidden_count for [object] as [varname]  %}
-        {% get_mptt_comment_hidden_count for [app].[model] [object_id] as [varname]  %}
+        {% get_mptt_comment_inmoderation_count for [object] as [varname]  %}
+        {% get_mptt_comment_inmoderation_count for [app].[model] [object_id] as [varname]  %}
 
     """
 
-    return MpttCommentHiddenCountNode.handle_token(parser, token)
+    return MpttCommentInModerationOnlyCountNode.handle_token(parser, token)
         
 def get_mptt_comment_toplevel_count(parser, token):
     """
@@ -276,6 +312,13 @@ def get_mptt_comments_threads(parser, token):
     """
     return MpttSpecialTreeListNode.handle_token(parser, token)
 
+def get_comment_list_inmoderation(parser, token):
+    """
+    Gets a flat list of non public, non removed comments and populates the template
+    context with a variable containing that value, whose name is defined by the
+    'as' clause.
+    """
+    return MpttCommentInModerationOnlyListNode.handle_token(parser, token)    
         
 def get_mptt_comment_list(parser, token):
     """
@@ -285,12 +328,12 @@ def get_mptt_comment_list(parser, token):
 
     Syntax::
 
-        {% get_comment_list for [object] as [varname]  %}
-        {% get_comment_list for [app].[model] [object_id] as [varname]  %}
+        {% get_mptt_comment_list for [object] as [varname]  %}
+        {% get_mptt_comment_list for [app].[model] [object_id] as [varname]  %}
 
     Example usage::
 
-        {% get_comment_list for event as comment_list %}
+        {% get_mptt_comment_list for event as comment_list %}
         {% for comment in comment_list %}
             ...
         {% endfor %}
@@ -309,6 +352,17 @@ def get_mptt_comment_form(parser, token):
         {% get_comment_form for [app].[model] [object_id] as [varname] %}
     """
     return MpttCommentFormNode.handle_token(parser, token)
+    
+def get_mptt_new_comment_link(parser, token):
+    """
+    Get a link to post a new comment.
+
+    Syntax::
+
+        {% get_mptt_new_comment_link for [object] as [varname] %}
+        {% get_mptt_new_comment_link for [app].[model] [object_id] as [varname] %}
+    """
+    return MpttCommentNewLinkNode.handle_token(parser, token)
 
 
 def mptt_comment_form_target():
@@ -324,19 +378,22 @@ def mptt_comment_form_target():
 def children_count(comment):
     return (comment.rght - comment.lft) / 2
 
-def mptt_comments_media():
+def mptt_comments_media(context):
+    return {
+        'MEDIA_URL' : context['MEDIA_URL']
+    }
 
-    return mark_safe( render_to_string( ('comments/comments_media.html',) , { }) )
+def mptt_comments_media_js(context):
+    return {
+        'MEDIA_URL' : context['MEDIA_URL']
+    }
     
-def mptt_comments_media_css():
-
-    return mark_safe( render_to_string( ('comments/comments_media_css.html',) , { }) )
+def mptt_comments_media_css(context):
+    return {
+        'MEDIA_URL' : context['MEDIA_URL']
+    }
     
-def mptt_comments_media_js():
-
-    return mark_safe( render_to_string( ('comments/comments_media_js.html',) , { }) )
-    
-def display_comment_toplevel_for(target):
+def display_comment_toplevel_for(context, target):
 
     model = target.__class__
         
@@ -349,7 +406,7 @@ def display_comment_toplevel_for(target):
         template_list, {
             "object" : target
         } 
-        # RequestContext(context['request'], {})
+        ,RequestContext(context['request'], {})
     )
 
 class MpttCommentCollapseState(template.Node):
@@ -368,10 +425,10 @@ class MpttCommentCollapseState(template.Node):
         comment = context[self.varname]
         collapse_levels_above = 'collapse_levels_above' in context and context['collapse_levels_above'] or 1e308
         collapse_levels_below = 'collapse_levels_below' in context and context['collapse_levels_below'] or -1e308        
-        
-        classname = ""
-        
+
         if 'post_was_successful' in context:
+            return "comment_expanded"
+        elif 'detail_comment' in context and context['detail_comment'] == comment:
             return "comment_expanded"
         else:
             if comment.level > collapse_levels_above or comment.level < collapse_levels_below:
@@ -383,14 +440,19 @@ def mptt_comment_print_collapse_state(parser, token):
     return MpttCommentCollapseState(token)
 
 register.filter(children_count)
-register.tag(get_mptt_comment_form)
-register.tag(mptt_comment_print_collapse_state)
+
 register.simple_tag(mptt_comment_form_target)
-register.simple_tag(mptt_comments_media)
-register.simple_tag(mptt_comments_media_css)
-register.simple_tag(mptt_comments_media_js)
+register.simple_tag(takes_context=True)(display_comment_toplevel_for)
+
+register.inclusion_tag('comments/comments_media.html', takes_context=True)(mptt_comments_media)
+register.inclusion_tag('comments/comments_media_css.html', takes_context=True)(mptt_comments_media_css)
+register.inclusion_tag('comments/comments_media_js.html', takes_context=True)(mptt_comments_media_js)
+
+register.tag(get_mptt_comment_form)
+register.tag(get_mptt_new_comment_link)
+register.tag(mptt_comment_print_collapse_state)
+register.tag(get_comment_list_inmoderation)
 register.tag(get_mptt_comment_list)
 register.tag(get_mptt_comments_threads)
-register.tag(get_mptt_comment_hidden_count)
+register.tag(get_mptt_comment_inmoderation_count)
 register.tag(get_mptt_comment_toplevel_count)
-register.simple_tag(display_comment_toplevel_for)
