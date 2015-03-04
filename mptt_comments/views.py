@@ -12,7 +12,10 @@ from django.template.loader import render_to_string
 from django.contrib.auth.decorators import login_required
 from django.contrib.contenttypes.models import ContentType
 from django.utils.html import escape
-from django.utils import simplejson
+try:
+    from django.utils import simplejson
+except ImportError:
+    import simplejson
 
 from django_comments.views.utils import next_redirect
 from django_comments.views.comments import CommentPostBadRequest
