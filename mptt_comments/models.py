@@ -21,6 +21,14 @@ class AbstractMpttComment(MPTTModel, Comment):
         tree_url = urlresolvers.reverse("comment-detail-tree", args=(self.tree_id, ))
         return "%s#c%s" % (tree_url, self.id)
 
+    def reparent_children(self, parent=None):
+        for child in self.get_children():
+            if parent:
+                parent = MpttComment.objects.get(id=parent.id)
+            current_child = MpttComment.objects.get(id=child.id)
+            current_child.move_to(parent, 'last-child')
+            current_child.save()
+
     class Meta:
         abstract = True
         ordering = ('tree_id', 'lft')
