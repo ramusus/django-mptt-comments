@@ -1,11 +1,12 @@
 from django.contrib import admin
 from django.conf import settings
-from mptt_comments.models import MpttComment
+from django_comments import get_model
 from django.utils.translation import ugettext_lazy as _
-from django.contrib.comments.models import Comment
+from django_comments.models import Comment
+from django_comments.admin import CommentsAdmin
 from django.contrib.contenttypes.models import ContentType
 
-class MpttCommentsAdmin(admin.ModelAdmin):
+class MpttCommentsAdmin(CommentsAdmin):
     fieldsets = (
         (None,
            {'fields': ('content_type', 'object_pk', 'parent', 'site')}
@@ -19,24 +20,29 @@ class MpttCommentsAdmin(admin.ModelAdmin):
      )
 
     raw_id_fields = ('parent', 'user') # We don't really want to get huge <select> with all the comments, users...
-    list_display = ('comment', 'user', 'getobject', 'level', 'ip_address', 'submit_date', 'is_public', 'is_removed')
+    list_display = ('title', 'user', 'getobject', 'level', 'ip_address', 'submit_date', 'is_public', 'not_is_removed')
     list_filter = ('submit_date', 'is_public', 'is_removed')
-    date_hierarchy = 'submit_date'
+    date_hierarchy = None
+    list_per_page = 40
     ordering = ('-submit_date',)
     search_fields = ('comment', 'user__username', 'user_name', 'user_email', 'user_url', 'ip_address')
-    
+
+    def not_is_removed(self, obj):
+        return not obj.is_removed
+    not_is_removed.boolean = True
+    not_is_removed.short_description = _('Not removed')
+
     def getobject(self, obj):
         try:
-            return obj.content_type.get_object_for_this_type(pk=str(obj.object_pk))
+            object_type = ContentType.objects.get(model=str(obj.content_type))
+            o = object_type.get_object_for_this_type(pk=str(obj.object_pk))
         except:
-            return "%s : %s" % (obj.content_type, obj.object_pk) 
-    getobject.short_description = 'Object'
-    
-    def queryset(self, request):
-        return super(MpttCommentsAdmin, self).queryset(request).exclude(comment='Root comment placeholder')
+            o = u"%s : %s" % (obj.content_type, obj.object_pk)
+        return o
+    getobject.short_description = _('Object')
 
 try:
-    admin.site.unregister(Comment)
+	admin.site.unregister(Comment)
 except:
-    pass
-admin.site.register(MpttComment, MpttCommentsAdmin)
+	pass
+admin.site.register(get_model(), MpttCommentsAdmin)

@@ -1,46 +1,85 @@
 import textwrap
-from django import http
+import datetime
+
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models
 from django.db.models import Q
-from django.shortcuts import render_to_response
+from django.template.response import TemplateResponse
+from django.http import Http404, HttpResponse, HttpResponseNotAllowed
 from django.template import RequestContext
 from django.template.loader import render_to_string
 from django.contrib.auth.decorators import login_required
 from django.contrib.contenttypes.models import ContentType
 from django.utils.html import escape
-from django.utils import datastructures
-import simplejson
-from django.http import Http404, HttpResponse
+try:
+    from django.utils import simplejson
+except ImportError:
+    import simplejson
 
-from django.contrib.comments.views.utils import next_redirect
-from django.contrib.comments.views.comments import CommentPostBadRequest
-from django.contrib.comments import signals, get_form, get_model
+from django_comments.views.utils import next_redirect
+from django_comments.views.comments import CommentPostBadRequest
+from django_comments import signals, get_form, get_model
 
-from mptt_comments.models import MpttComment
+from mptt_comments.decorators import login_required_ajax
 
-def get_ip(request):
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+def _lookup_content_object(data):
+    # Look up the object we're trying to comment about
+    ctype = data.get("content_type")
+    object_pk = data.get("object_pk")
+    parent_pk = data.get("parent_pk")
+
+    if parent_pk:
+        try:
+            parent_comment = get_model().objects.get(pk=parent_pk)
+            target = parent_comment.content_object
+            model = target.__class__
+        except get_model().DoesNotExist:
+            return CommentPostBadRequest(
+                "Parent comment with PK %r does not exist." % \
+                    escape(parent_pk))
+    elif ctype and object_pk:
+        try:
+            parent_comment = None
+            model = models.get_model(*ctype.split(".", 1))
+            target = model._default_manager.get(pk=object_pk)
+        except TypeError:
+            return CommentPostBadRequest(
+                "Invalid content_type value: %r" % escape(ctype))
+        except AttributeError:
+            return CommentPostBadRequest(
+                "The given content-type %r does not resolve to a valid model." % \
+                    escape(ctype))
+        except ObjectDoesNotExist:
+            return CommentPostBadRequest(
+                "No object matching content-type %r and object PK %r exists." % \
+                    (escape(ctype), escape(object_pk)))
+    else:
+        return CommentPostBadRequest("Missing content_type or object_pk field.")
+
+    return (target, parent_comment, model)
+
+@login_required_ajax
+def new_comment(request, parent_pk=None, content_type=None, object_pk=None, *args, **kwargs):
     """
-    Gets the true client IP address of the request
-    Contains proxy handling involving HTTP_X_FORWARDED_FOR and multiple addresses
-    """
-    ip = request.META.get('REMOTE_ADDR',None)
-    if 'HTTP_X_FORWARDED_FOR' in request.META:
-        ip = request.META['HTTP_X_FORWARDED_FOR']
-    return ip.replace(',','').split()[0] # choose first of (possibly) multiple values
+    Display the form used to post a reply.
 
-def new_comment(request, comment_id=None, *args, **kwargs):
+    Expects a comment_id, and an optionnal 'is_ajax' parameter in request.GET.
+    """
 
     is_ajax = request.GET.get('is_ajax') and '_ajax' or ''
-
-    if not comment_id:
-        return CommentPostBadRequest("Missing comment id.")
-
-    parent_comment = get_model().objects.get(pk=comment_id)
-
-    target = parent_comment.content_object
-    model = target.__class__
+    data = {
+        'parent_pk': parent_pk,
+        'content_type': content_type,
+        'object_pk': object_pk,
+    }
+    response = _lookup_content_object(data)
+    if isinstance(response, HttpResponse):
+        return response
+    else:
+        target, parent_comment, model = response
 
     # Construct the initial comment form
     form = get_form()(target, parent_comment=parent_comment)
@@ -50,13 +89,9 @@ def new_comment(request, comment_id=None, *args, **kwargs):
         "comments/%s_new_form%s.html" % (model._meta.app_label, is_ajax),
         "comments/new_form%s.html" % is_ajax,
     ]
-    return render_to_response(
-        template_list, {
-            "form" : form,
-        },
-        RequestContext(request, {})
-    )
+    return TemplateResponse(request, template_list, { "form" : form })
 
+@login_required_ajax
 @login_required
 def post_comment(request, next=None, *args, **kwargs):
     """
@@ -68,7 +103,7 @@ def post_comment(request, next=None, *args, **kwargs):
 
     # Require POST
     if request.method != 'POST':
-        return http.HttpResponseNotAllowed(["POST"])
+        return HttpResponseNotAllowed(["POST"])
 
     is_ajax = request.POST.get('is_ajax') and '_ajax' or ''
 
@@ -81,33 +116,11 @@ def post_comment(request, next=None, *args, **kwargs):
         if not data.get('email', ''):
             data["email"] = request.user.email
 
-    # Look up the object we're trying to comment about
-    ctype = data.get("content_type")
-    object_pk = data.get("object_pk")
-    parent_pk = data.get("parent_pk")
-    parent_comment = None
-    if ctype is None or object_pk is None:
-        return CommentPostBadRequest("Missing content_type or object_pk field.")
-    try:
-        model = models.get_model(*ctype.split(".", 1))
-        target = model._default_manager.get(pk=object_pk)
-        if parent_pk:
-            parent_comment = get_model().objects.get(pk=parent_pk)
-    except TypeError:
-        return CommentPostBadRequest(
-            "Invalid content_type value: %r" % escape(ctype))
-    except AttributeError:
-        return CommentPostBadRequest(
-            "The given content-type %r does not resolve to a valid model." % \
-                escape(ctype))
-    except MpttComment.DoesNotExist:
-        return CommentPostBadRequest(
-            "Parent comment with PK %r does not exist." % \
-                escape(parent_pk))
-    except ObjectDoesNotExist:
-        return CommentPostBadRequest(
-            "No object matching content-type %r and object PK %r exists." % \
-                (escape(ctype), escape(object_pk)))
+    response = _lookup_content_object(data)
+    if isinstance(response, HttpResponse):
+        return response
+    else:
+        target, parent_comment, model = response
 
     # Do we want to preview the comment?
     preview = data.get("submit", "").lower() == "preview" or \
@@ -129,21 +142,31 @@ def post_comment(request, next=None, *args, **kwargs):
             "comments/%s_preview%s.html" % (model._meta.app_label, is_ajax),
             "comments/preview%s.html" % is_ajax
         ]
-        return render_to_response(
-            template_list, {
-                "comment" : form.data.get("comment", ""),
-                "title" : form.data.get("title", ""),
-                "form" : form,
-                "allow_post": not form.errors,
-                "is_ajax" : is_ajax
-            },
-            RequestContext(request, {})
-        )
+        data = {
+            'comment': form.data.get("comment", ""),
+            'parent': parent_comment,
+            'level': parent_comment and parent_comment.level + 1 or 0,
+            'title': form.data.get("title", ""),
+            'submit_date': datetime.datetime.now(),
+            'rght': 0,
+            'lft': 0,
+            'user': request.user,
+            'user_name' : request.user.username,
+        }
+        comment = get_model()(**data)
+        return TemplateResponse(request, template_list, {
+            "comment" : comment,
+            "preview" : True,
+            "form" : form,
+            "allow_post": not form.errors,
+            "is_ajax" : is_ajax,
+        })
 
     # Otherwise create the comment
     comment = form.get_comment_object()
-    comment.ip_address = get_ip(request)
+    comment.ip_address = request.META.get("REMOTE_ADDR", None)
     comment.user = request.user
+    comment.user_name = request.user.username
 
     # Signal that the comment is about to be saved
     responses = signals.comment_will_be_posted.send(
@@ -171,6 +194,10 @@ def confirmation_view(template, doc="Display a confirmation view.", is_ajax=Fals
     """
     Confirmation view generator for the "comment was
     posted/flagged/deleted/approved" views.
+
+    The HTTP Status code will be different depending on the comment used:
+    - 201 Created for a is_public=True comment
+    - 202 Accepted for a is_public=False comment
     """
     def confirmed(request):
         comment = None
@@ -179,13 +206,14 @@ def confirmation_view(template, doc="Display a confirmation view.", is_ajax=Fals
                 comment = get_model().objects.get(pk=request.GET['c'])
             except ObjectDoesNotExist:
                 pass
-        return render_to_response(template, {
-                'comment': comment,
-                'is_ajax': is_ajax,
-                'success' : True
-            },
-            context_instance=RequestContext(request)
-        )
+
+        response = TemplateResponse(request, template, {
+            'comment': comment,
+            'is_ajax': is_ajax,
+            'success' : True
+        })
+        response.status_code = comment.is_public and 201 or 202
+        return response
 
     confirmed.__doc__ = textwrap.dedent("""\
         %s
@@ -208,8 +236,6 @@ comment_done = confirmation_view(
     template = "comments/posted.html",
     doc = """Display a "comment was posted" success page."""
 )
-
-
 
 def comment_tree_json(request, object_list, tree_id, cutoff_level, bottom_level):
 
@@ -300,16 +326,24 @@ def comments_more(request, from_comment_pk, restrict_to_tree=False, *args, **kwa
 
     json_data['comments_tree'] = comment_tree_json(request, remaining, comment.tree_id, cutoff_level, bottom_level)
 
-    return http.HttpResponse(simplejson.dumps(json_data), mimetype='application/json')
+    return HttpResponse(simplejson.dumps(json_data), mimetype='application/json')
 
-def comments_subtree(request, from_comment_pk, include_self=None, include_ancestors=None, *args, **kwargs):
-
+def comments_fulltree(request, tree_id, *args, **kwargs):
     try:
-        comment = get_model().objects.select_related('content_type').get(pk=from_comment_pk)
-    except get_model().DoesNotExist:
-        raise Http404
+        comments = get_model().objects.filter_hidden_comments().filter(tree_id=tree_id)
+        comment = comments[0]
+    except IndexError:
+        raise Http404("No top level comment found for tree id %s" % tree_id)
+    cutoff = getattr(settings, 'MPTT_COMMENTS_FULLTREE_CUTOFF', getattr(settings, 'MPTT_COMMENTS_CUTOFF', 3)) + 1
+    return comments_subtree(request, comment.pk, include_self=True, include_ancestors=True, cutoff=cutoff, *args, **kwargs)
 
-    cutoff_level = comment.level + getattr(settings, 'MPTT_COMMENTS_CUTOFF', 3)
+def comments_subtree(request, from_comment_pk, include_self=None, include_ancestors=None, cutoff=None, *args, **kwargs):
+
+    comment = get_model().objects.select_related('content_type').get(pk=from_comment_pk)
+
+    if not cutoff:
+        cutoff = getattr(settings, 'MPTT_COMMENTS_CUTOFF', 3)
+    cutoff_level = comment.level + cutoff
     bottom_level = not include_ancestors and (comment.level - (include_self and 1 or 0)) or 0
 
     qs = get_model().objects.filter_hidden_comments().filter(
@@ -326,7 +360,7 @@ def comments_subtree(request, from_comment_pk, include_self=None, include_ancest
         json_data = {'comments_for_update': [], 'comments_tree': {} }
         json_data['comments_tree'] = comment_tree_json(request, list(qs), comment.tree_id, cutoff_level, bottom_level)
 
-        return http.HttpResponse(simplejson.dumps(json_data), mimetype='application/json')
+        return HttpResponse(simplejson.dumps(json_data), mimetype='application/json')
 
     else:
 
@@ -340,21 +374,49 @@ def comments_subtree(request, from_comment_pk, include_self=None, include_ancest
         ]
 
         comments = list(qs)
-        if include_ancestors:
-            comments = list(comment.get_ancestors()) + comments
 
-        return render_to_response(
-            template_list, {
-                "comments" : comments,
-                "bottom_level": bottom_level,
-                "cutoff_level": cutoff_level - 1,
-                "collapse_levels_above": getattr(settings, 'MPTT_COMMENTS_COLLAPSE_ABOVE', 2),
-                "collapse_levels_below": comment.level
-            },
-            RequestContext(request, {})
-        )
+        pagination_on = getattr(settings, 'MPTT_COMMENTS_PAGINATION', False)
+        page_length = getattr(settings, 'MPTT_COMMENTS_PAGINATION_PAGE_LENGTH', 50)
 
-def count_for_objects(request, content_type_id):
+        if pagination_on:
+            paginator = Paginator(comments, page_length) # comments per page
+            page = request.GET.get('page')
+
+            try:
+                comments = paginator.page(page)
+            except PageNotAnInteger:
+                # If page is not an integer, deliver first page.
+                comments = paginator.page(1)
+            except EmptyPage:
+                # If page is out of range (e.g. 9999), deliver last page of results.
+                comments = paginator.page(paginator.num_pages)
+
+            if comments.has_previous():
+                # Prepend ancestors of the first comment on page
+                comments.object_list = list(comments[0].get_ancestors()) + comments.object_list
+            elif include_ancestors:
+                comments.object_list = list(comment.get_ancestors()) + comments.object_list
+
+            if comments.has_next():
+                # Append children of the last comment on page
+                comments.object_list = comments.object_list + list(comments[len(comments.object_list)-1].get_children())
+        else:
+            if include_ancestors:
+                comments = list(comment.get_ancestors()) + comments
+
+
+        return TemplateResponse(request, template_list, {
+            "object" : target,
+            "detail_comment" : comment,
+            "comments" : comments,
+            "bottom_level": bottom_level,
+            "cutoff_level": cutoff_level - 1,
+            "collapse_levels_above": getattr(settings, 'MPTT_COMMENTS_COLLAPSE_ABOVE', 2),
+            "collapse_levels_below": getattr(settings, 'MPTT_COMMENTS_COLLAPSE_BELOW_DETAIL', True) and comment.level or 0,
+            "pagination": pagination_on
+        })
+
+def count_for_object(request, content_type_id, object_pk, mimetype='text/plain'):
     """
     Returns the comment count for any object defined by content_type_id and object_id or slug.
     Mimetype defaults to plain text.
@@ -363,7 +425,5 @@ def count_for_objects(request, content_type_id):
         ctype = ContentType.objects.get_for_id(content_type_id)
     except ObjectDoesNotExist:
         raise Http404("No content found for id %s" % content_type_id)
-    pks = request.REQUEST.getlist('pk')
-    response = simplejson.dumps(dict(zip(pks,
-        [MpttComment.objects.filter(object_pk=p, content_type=ctype).count() for p in pks])))
-    return HttpResponse(response, mimetype='application/json')
+    count = str(get_model().objects.filter(object_pk=object_pk, content_type=ctype).count())
+    return HttpResponse(count, mimetype = mimetype)

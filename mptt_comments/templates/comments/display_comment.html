@@ -1,7 +1,6 @@
     {% load i18n %}
     {% load mptt_tags %}
     {% load mptt_comments_tags %}
-    {% load comparison %}
     
     {% if tree %}
         {% if not tree.new_level %}
@@ -9,40 +8,35 @@
         {% endif %}
     {% endif %}
 
-    <div class="comment comment_level_{{ comment.level }} {% mptt_comment_print_collapse_state comment %} {% if comment.is_removed %}is_removed{% endif %}" id="comment_{{ comment.pk }}">
-    <!-- this_is_a_comment -->
+    <div class="{% include 'comments/_comment_class.html' %}" id="c{{ comment.pk }}">
         
-    <p class="comment_title">
-        <a class="comment_expand" href="{% url comment-detail comment.pk %}">
-            {% if comment.is_removed %}
-                {% trans "Comment removed" %}
-            {% else %}
-                {{ comment.title }}
+    <div class="comment_outer">
+        {% block comment_header %}
+            {% include "comments/_comment_title.html" %}
+        {% endblock %}
+        
+        <div class="comment_content">
+            {% block comment_meta %}            
+                {% include "comments/_comment_meta.html" %}
+            {% endblock %}
+
+            {% block comment_body %}
+                {% if comment.is_removed %}
+                    {% trans "Comment removed" %}
+                {% else %}
+                    {{ comment.comment|linebreaks }}
+                {% endif %}
+            {% endblock %}
+            
+            {% if debug %}
+                {% include "comments/_comment_debug.html" %}
             {% endif %}
-        </a>
-    </p>
-    
-    <div class="comment_content">
+            
+            {% block comment_footer %}
+                {% include "comments/_comment_replies.html" %}
+            {% endblock %}
         
-    <p class="comment_meta">
-        <span class="commented_by">{% trans "Commented by" %} {{ comment.name }}</span> -
-        <span class="commented_day">{{ comment.submit_date|date:"l" }}</span>,
-        <span class="commented_date">{{ comment.submit_date|date:"j F" }}</span>
-        {% trans "at" %} <span class="commented_time">{{ comment.submit_date|date:"H:i" }}<span> 
-    </p>
-        
-    {% if comment.is_removed %}
-        {% trans "Comment removed" %}
-    {% else %}
-        {{ comment.comment|linebreaks }}
-    {% endif %}
-    
-    {% if debug %}
-        {% include "comments/_comment_debug.html" %}
-    {% endif %}
-    
-    {% include "comments/_comment_replies.html" %}
-    
+        </div>
     </div>
 
     {% if tree %}
@@ -50,15 +44,15 @@
             {% if forloop.parentloop.last %}
             
                 {% if subcomments_remaining %}
-                    {% ifequal level 0 %}
+                    {% if level == 0 %}
                         {% include "comments/_subcomments_remaining.html" %}
-                    {% endifequal %}
+                    {% endif %}
                 {% endif %}
 
                 {# not the topmost tree, skip closing some levels #}
-                {% if_greater_or_equal level bottom_level %}
+                {% if level >= bottom_level %}
                     </div>
-                {% endif_greater_or_equal %}
+                {% endif %}
                 
             {% else %}
                 </div>

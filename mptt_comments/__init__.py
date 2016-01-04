@@ -33,8 +33,12 @@ def comment_callback_for_notification(sender, request=None, comment=None, **kwar
     if not notification:
         return
 
-    user = request.user
-    infodict = {"user": user, "comment": comment, "object": comment.content_object }
+    if not comment.is_public and not getattr(settings, 'MPTT_COMMENTS_SEND_NOTICES_FOR_NONPUBLIC', True):
+        # If comment is not public and MPTT_COMMENTS_SEND_NOTICES_FOR_NONPUBLIC is False, we don't
+        # send the notifications at all.
+        return
+
+    infodict = {"user": comment.user, "comment": comment, "object": comment.content_object }
 
     if comment.parent:
         # Comment has a parent, we'll use the _replied notices
@@ -44,24 +48,24 @@ def comment_callback_for_notification(sender, request=None, comment=None, **kwar
 
         # Additionnaly, we need to notify the user that posted the comment we
         # are replying to
-        if comment.parent.user and comment.parent.user != user:
+        if comment.parent.user and comment.parent.user != comment.user:
             notification.send([comment.parent.user], "comment_reply_received", infodict)
 
     else:
         notice_type_suffix = "posted"
 
     # Notifications of stuff I'm doing
-    notification.send([user], "comment_%s" % (notice_type_suffix, ), infodict)
+    notification.send([comment.user], "comment_%s" % (notice_type_suffix, ), infodict)
 
     # Notifications to my friends and/or my followers, except the author of the
     # parent comment, since he'll receive a separate notice anyway
     if friends:
         notification.send((x['friend'] for x in
-            Friendship.objects.friends_for_user(request.user) if x['friend'] != comment.parent.user),
+            Friendship.objects.friends_for_user(comment.user) if x['friend'] != comment.parent.user),
             "comment_friend_%s" % (notice_type_suffix, ), infodict
         )
     if relationships:
-        followers = request.user.relationships.followers()
+        followers = comment.user.relationships.followers()
         if comment.parent and comment.parent.user:
             followers = followers.exclude(username=comment.parent.user.username)
         notification.send(followers, "comment_friend_%s" % (notice_type_suffix, ), infodict)
