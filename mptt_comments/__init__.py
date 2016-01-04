@@ -1,13 +1,13 @@
 from django.core import urlresolvers
 from django.conf import settings
-from django.contrib.comments.signals import comment_was_posted
+from django_comments.signals import comment_was_posted
 from django.conf import settings
 import django.db.models
 
 notification = False
 if "notification" in settings.INSTALLED_APPS:
     from notification import models as notification
-    
+
 friends = False
 if "friends" in settings.INSTALLED_APPS:
     friends = True
@@ -32,27 +32,27 @@ def get_form_target():
 def comment_callback_for_notification(sender, request=None, comment=None, **kwargs):
     if not notification:
         return
-        
+
     user = request.user
     infodict = {"user": user, "comment": comment, "object": comment.content_object }
-        
+
     if comment.parent:
         # Comment has a parent, we'll use the _replied notices
         notice_type_suffix = "replied"
         infodict["parent_comment"] = comment.parent
         infodict["parent_comment_user"] = comment.parent.user
-        
+
         # Additionnaly, we need to notify the user that posted the comment we
         # are replying to
         if comment.parent.user and comment.parent.user != user:
             notification.send([comment.parent.user], "comment_reply_received", infodict)
-        
+
     else:
         notice_type_suffix = "posted"
-        
+
     # Notifications of stuff I'm doing
     notification.send([user], "comment_%s" % (notice_type_suffix, ), infodict)
-    
+
     # Notifications to my friends and/or my followers, except the author of the
     # parent comment, since he'll receive a separate notice anyway
     if friends:
